@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(BitDogRescue BitDogRescue.c )
+add_executable(BitDogRescue BitDogRescue.c lib/ssd1306.c)
 
 pico_set_program_name(BitDogRescue "BitDogRescue")
 pico_set_program_version(BitDogRescue "0.1")
@@ -45,7 +45,7 @@ pico_generate_pio_header(BitDogRescue ${CMAKE_CURRENT_LIST_DIR}/lib/ws2812.pio O
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(BitDogRescue 1)
-pico_enable_stdio_usb(BitDogRescue 0)
+pico_enable_stdio_usb(BitDogRescue 1)
 
 # Add the standard library to the build
 target_link_libraries(BitDogRescue

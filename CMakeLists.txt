@@ -40,22 +40,29 @@ add_executable(BitDogRescue BitDogRescue.c )
 pico_set_program_name(BitDogRescue "BitDogRescue")
 pico_set_program_version(BitDogRescue "0.1")
 
+pico_generate_pio_header(BitDogRescue ${CMAKE_CURRENT_LIST_DIR}/lib/ws2812.pio OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/lib)
+
+
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(BitDogRescue 1)
 pico_enable_stdio_usb(BitDogRescue 0)
 
 # Add the standard library to the build
 target_link_libraries(BitDogRescue
-        pico_stdlib)
+        pico_stdlib
+        hardware_adc
+        hardware_pwm
+        )
 
 # Add the standard include files to the build
 target_include_directories(BitDogRescue PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/lib
 )
 
 # Add any user requested libraries
 target_link_libraries(BitDogRescue 
-        
+        hardware_i2c
+        hardware_pio
         )
 
 pico_add_extra_outputs(BitDogRescue)

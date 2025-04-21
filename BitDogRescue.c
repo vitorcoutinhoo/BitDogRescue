@@ -21,6 +21,10 @@
 #define BBUTTON 6
 #define ABUTTON 5
 
+// Buzzers
+#define ABUZZER 10
+#define BBUZZER 21
+
 // Display OLED
 #define I2C_PORT i2c1
 #define I2C_SDA 14
@@ -44,6 +48,7 @@ int total_resgatadas = 0;
 int dronex, droney;
 bool jogo_ativo = false;
 volatile bool botao_pressionado_flag = false;
+volatile bool tocar_som_inicio_flag = false;
 absolute_time_t ultimo_press = 0;
 
 // Prototipação
@@ -61,6 +66,13 @@ void atualizar_matriz_led();
 void put_pixel(uint32_t);
 uint32_t color(uint8_t, uint8_t, uint8_t);
 void show_numbers(uint number);
+void beep(int, int);
+void som_tela_inicial();
+void som_inicio_jogo();
+void som_mover_drone();
+void som_resgate();
+void som_vitoria();
+void som_derrota();
 
 int main() {
     stdio_init_all();
@@ -81,6 +93,10 @@ int main() {
     gpio_set_irq_enabled_with_callback(BBUTTON, GPIO_IRQ_EDGE_FALL, true, &irq_buttons);
     gpio_set_irq_enabled_with_callback(ABUTTON, GPIO_IRQ_EDGE_FALL, true, &irq_buttons);
 
+    // Buzzers
+    gpio_init(ABUZZER); gpio_set_dir(ABUZZER, GPIO_OUT);
+    gpio_init(BBUZZER); gpio_set_dir(BBUZZER, GPIO_OUT);
+
     // Display OLED
     i2c_init(I2C_PORT, 400 * 1000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
@@ -99,15 +115,22 @@ int main() {
     int count = 0;
     int x = 0;
     absolute_time_t ultimo_tempo = get_absolute_time();
+    bool som_tela_inicial_tocado = false;
 
     while (true) {
         if (!jogo_ativo) {
+            if (!som_tela_inicial_tocado) {
+                som_tela_inicial();
+                som_tela_inicial_tocado = true;
+            }
+
             ssd1306_fill(&ssd, false);
             ssd1306_rect(&ssd, 0, 0, 128, 64, true, false); 
             ssd1306_draw_string(&ssd, "BitDogRescue", 16, 12);
             ssd1306_draw_string(&ssd, "pressione A", 20, 36);
             ssd1306_draw_string(&ssd, "para iniciar", 18, 46);
             ssd1306_send_data(&ssd);
+            count = 0;
         } else {
             ssd1306_fill(&ssd, false);
             snprintf(timer, sizeof(timer), "%d", count);
@@ -121,10 +144,16 @@ int main() {
             atualizar_matriz_led();
             jogo_ativo = update_timer(count, x);
 
+            if (tocar_som_inicio_flag) {
+                som_inicio_jogo();
+                tocar_som_inicio_flag = false;
+            }
+
             if (checar_vitoria()) {
                 ssd1306_fill(&ssd, false);
                 ssd1306_rect(&ssd, 1, 1, 127, 63, true, false);
                 ssd1306_draw_string(&ssd, "Voce Venceu", 20, 26);
+                som_vitoria();
                 gpio_put(BLUE, false);
                 gpio_put(GREEN, true);
                 ssd1306_send_data(&ssd);
@@ -132,6 +161,7 @@ int main() {
                 printf("[TEMPO] Missao concluida em %dmin %ds.\n", count / 60, count % 60);
                 sleep_ms(5000);
                 jogo_ativo = false;
+                som_tela_inicial_tocado = false;
                 continue;
             }
 
@@ -147,6 +177,7 @@ int main() {
     }
 }
 
+
 bool update_timer(int tempo, int x) {
     if (tempo <= 120) {
         if ((int)(floor(log10(tempo)) + 1) == 1 || tempo == 0)
@@ -161,6 +192,7 @@ bool update_timer(int tempo, int x) {
         ssd1306_fill(&ssd, false);
         ssd1306_rect(&ssd, 1, 1, 127, 63, true, false);
         ssd1306_draw_string(&ssd, "Voce Perdeu", 20, 26);
+        som_derrota();
         gpio_put(RED, true);
         ssd1306_send_data(&ssd);
         printf("[FIM] Tempo esgotado. Missao falhou.\n");
@@ -228,10 +260,10 @@ void mover_drone() {
     adc_select_input(0);
     uint16_t val_y = adc_read();
 
-    if (val_x < limiar_baixo && dronex > 4) dronex -= passo;
-    else if (val_x > limiar_alto && dronex < 120) dronex += passo;
-    if (val_y < limiar_baixo && droney < 56) droney += passo;
-    else if (val_y > limiar_alto && droney > 8) droney -= passo;
+    if (val_x < limiar_baixo && dronex > 4) { dronex -= passo; som_mover_drone();}
+    else if (val_x > limiar_alto && dronex < 120) { dronex += passo; som_mover_drone();}
+    if (val_y < limiar_baixo && droney < 56) { droney += passo; som_mover_drone();} 
+    else if (val_y > limiar_alto && droney > 8) { droney -= passo; som_mover_drone();}
 }
 
 void verificar_resgate() {
@@ -241,6 +273,7 @@ void verificar_resgate() {
             vitima_ativa[i] = false;
             total_resgatadas++;
             printf("[RESGATE] Vítima salva em %d, %d\n", posx[i], posy[i]);
+            som_resgate();
         }
     }
     botao_pressionado_flag = false;
@@ -265,6 +298,7 @@ void irq_buttons(uint gpio, uint32_t event){
         gpio_put(RED, false);
         gpio_put(GREEN, false);
         printf("[INICIO] Jogo iniciado.\n");
+        tocar_som_inicio_flag = true; 
     }
 }
 
@@ -312,4 +346,51 @@ void show_numbers(uint number) {
         else
             put_pixel(0);                 
     }
+}
+
+void beep(int freq, int duration_ms) {
+    int delay_us = 1000000 / (freq * 2);
+    int cycles = (freq * duration_ms) / 1000;
+    for (int i = 0; i < cycles; i++) {
+        gpio_put(ABUZZER, 1);
+        gpio_put(BBUZZER, 1);
+        sleep_us(delay_us);
+        gpio_put(ABUZZER, 0);
+        gpio_put(BBUZZER, 0);
+        sleep_us(delay_us);
+    }
+}
+
+void som_tela_inicial() {
+    beep(1000, 100);
+    sleep_ms(100);
+    beep(1200, 100);
+}
+
+void som_inicio_jogo() {
+    beep(1500, 200);
+}
+
+void som_mover_drone() {
+    beep(900, 20);
+}
+
+void som_resgate() {
+    beep(800, 100);
+    sleep_ms(50);
+    beep(600, 100);
+}
+
+void som_vitoria() {
+    beep(1000, 100);
+    sleep_ms(100);
+    beep(1200, 100);
+    sleep_ms(100);
+    beep(1400, 200);
+}
+
+void som_derrota() {
+    beep(600, 300);
+    sleep_ms(100);
+    beep(400, 300);
 }

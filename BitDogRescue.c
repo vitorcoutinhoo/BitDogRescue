@@ -4,58 +4,49 @@
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "hardware/adc.h"
+#include "ws2812.pio.h"
 #include "ssd1306.h"
 
 // Definindo os pinos dos leds
 #define BLUE 12
 #define GREEN 11
 #define RED 13
+#define LED_MATRIX 7
 
-// Definindo os eixos do joystick
+// Eixos do joystick
 #define EIXO_X 26
 #define EIXO_Y 27
 
-// Definindo os botões
+// Botões
 #define BBUTTON 6
 #define ABUTTON 5
 
-// Definição dos pinos do display
+// Display OLED
 #define I2C_PORT i2c1
 #define I2C_SDA 14
 #define I2C_SCL 15
 #define ENDERECO 0x3C
 
-// Estrutura do display
+// Display
 ssd1306_t ssd;
-
-// Variável do Cronômetro
 char timer[4];
 
-// Constantes de quantidade e tamanho
+// Constantes
 #define MAX_VITIMAS 5
 #define DRONE_SIZE 8
 #define VITIMA_SIZE 4
 
-// Posições das vítimas
+// Estado do jogo
 int posx[MAX_VITIMAS];
 int posy[MAX_VITIMAS];
-
-// Contagem de vitimas
 bool vitima_ativa[MAX_VITIMAS];
 int total_resgatadas = 0;
-
-// Coordenadas do drone
-int dronex;
-int droney;
-
-// Estado do jogo
+int dronex, droney;
 bool jogo_ativo = false;
-
-// Controle do botão
 volatile bool botao_pressionado_flag = false;
 absolute_time_t ultimo_press = 0;
 
-// Funções
+// Prototipação
 bool update_timer(int, int);
 void draw_object(int, int, int);
 void posicionar_vitimas();
@@ -66,52 +57,58 @@ void verificar_resgate();
 void irq_buttons(uint, uint32_t);
 bool checar_vitoria();
 void atualizar_led_azul();
+void atualizar_matriz_led();
+void put_pixel(uint32_t);
+uint32_t color(uint8_t, uint8_t, uint8_t);
+void show_numbers(uint number);
 
 int main() {
     stdio_init_all();
 
-    // Iniciando ADC
+    // ADC
     adc_init();
     adc_gpio_init(EIXO_X); 
     adc_gpio_init(EIXO_Y); 
 
-    // Iniciando LEDs
-    gpio_init(RED);   gpio_set_dir(RED, GPIO_OUT);
-    gpio_init(BLUE);  gpio_set_dir(BLUE, GPIO_OUT);
+    // LEDs
+    gpio_init(RED); gpio_set_dir(RED, GPIO_OUT);
+    gpio_init(BLUE); gpio_set_dir(BLUE, GPIO_OUT);
     gpio_init(GREEN); gpio_set_dir(GREEN, GPIO_OUT);
 
-    // Iniciando Button e interrupção
+    // Botões
     gpio_init(BBUTTON); gpio_set_dir(BBUTTON, GPIO_IN); gpio_pull_up(BBUTTON);
     gpio_init(ABUTTON); gpio_set_dir(ABUTTON, GPIO_IN); gpio_pull_up(ABUTTON);
     gpio_set_irq_enabled_with_callback(BBUTTON, GPIO_IRQ_EDGE_FALL, true, &irq_buttons);
     gpio_set_irq_enabled_with_callback(ABUTTON, GPIO_IRQ_EDGE_FALL, true, &irq_buttons);
 
-    // Configurações do display
+    // Display OLED
     i2c_init(I2C_PORT, 400 * 1000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA);
-    gpio_pull_up(I2C_SCL);
-
+    gpio_pull_up(I2C_SDA); gpio_pull_up(I2C_SCL);
     ssd1306_init(&ssd, WIDTH, HEIGHT, false, ENDERECO, I2C_PORT);
     ssd1306_config(&ssd);
     ssd1306_send_data(&ssd);
+
+    // WS2812
+    PIO pio = pio0;
+    uint sm = 0;
+    uint offset = pio_add_program(pio, &ws2812_program);
+    ws2812_program_init(pio, sm, offset, LED_MATRIX, 800000, false);
 
     int count = 0;
     int x = 0;
     absolute_time_t ultimo_tempo = get_absolute_time();
 
     while (true) {
-        if (!jogo_ativo){
+        if (!jogo_ativo) {
             ssd1306_fill(&ssd, false);
             ssd1306_rect(&ssd, 0, 0, 128, 64, true, false); 
             ssd1306_draw_string(&ssd, "BitDogRescue", 16, 12);
             ssd1306_draw_string(&ssd, "pressione A", 20, 36);
             ssd1306_draw_string(&ssd, "para iniciar", 18, 46);
             ssd1306_send_data(&ssd);
-            count = 0;
-        }
-        else {
+        } else {
             ssd1306_fill(&ssd, false);
             snprintf(timer, sizeof(timer), "%d", count);
             ssd1306_rect(&ssd, 0, 0, 128, 64, true, false);
@@ -121,6 +118,7 @@ int main() {
             verificar_resgate();
             desenhar_vitimas();
             draw_object(dronex, droney, DRONE_SIZE);
+            atualizar_matriz_led();
             jogo_ativo = update_timer(count, x);
 
             if (checar_vitoria()) {
@@ -129,34 +127,33 @@ int main() {
                 ssd1306_draw_string(&ssd, "Voce Venceu", 20, 26);
                 gpio_put(BLUE, false);
                 gpio_put(GREEN, true);
-
-                int tempo_final = count;
+                ssd1306_send_data(&ssd);
                 printf("[FIM] Todas as vítimas foram salvas!\n");
-                printf("[TEMPO] Missao concluida em %dmin %ds.\n", tempo_final / 60, tempo_final % 60);
+                printf("[TEMPO] Missao concluida em %dmin %ds.\n", count / 60, count % 60);
+                sleep_ms(5000);
                 jogo_ativo = false;
+                continue;
             }
 
             ssd1306_send_data(&ssd);
 
-            // Atualiza o cronômetro a cada 1 segundo real
             if (absolute_time_diff_us(ultimo_tempo, get_absolute_time()) >= 1000000) {
-                count += 1;
+                count++;
                 ultimo_tempo = get_absolute_time();
             }
 
-            sleep_ms(300); // atualização mais suave do movimento do drone
-        }  
+            sleep_ms(300);
+        }
     }
 }
-
 
 bool update_timer(int tempo, int x) {
     if (tempo <= 120) {
         if ((int)(floor(log10(tempo)) + 1) == 1 || tempo == 0)
             x = 119;
-        if ((int)(floor(log10(tempo) + 1)) == 2)
+        else if ((int)(floor(log10(tempo) + 1)) == 2)
             x = 111;
-        if ((int)(floor(log10(tempo) + 1)) == 3)
+        else
             x = 103;
 
         ssd1306_draw_string(&ssd, timer, x, 2);
@@ -165,6 +162,9 @@ bool update_timer(int tempo, int x) {
         ssd1306_rect(&ssd, 1, 1, 127, 63, true, false);
         ssd1306_draw_string(&ssd, "Voce Perdeu", 20, 26);
         gpio_put(RED, true);
+        ssd1306_send_data(&ssd);
+        printf("[FIM] Tempo esgotado. Missao falhou.\n");
+        sleep_ms(5000);
         return false;
     }
     return true;
@@ -176,15 +176,12 @@ void draw_object(int x, int y, int size) {
 
 void posicionar_vitimas() {
     srand(time_us_32());
-
     for (int i = 0; i < MAX_VITIMAS; i++) {
         bool pos_valida = false;
-
         while (!pos_valida) {
             pos_valida = true;
             posx[i] = (rand() % (118 - 4 + 1)) + 4;
             posy[i] = (rand() % (59 - 12 + 1)) + 8;
-
             for (int j = 0; j < i; j++) {
                 int dx = abs(posx[i] - posx[j]);
                 int dy = abs(posy[i] - posy[j]);
@@ -199,21 +196,17 @@ void posicionar_vitimas() {
 }
 
 void desenhar_vitimas() {
-    for (int i = 0; i < MAX_VITIMAS; i++) {
-        if (vitima_ativa[i]) {
+    for (int i = 0; i < MAX_VITIMAS; i++)
+        if (vitima_ativa[i])
             draw_object(posx[i], posy[i], VITIMA_SIZE);
-        }
-    }
 }
 
 void posicionar_drone() {
     bool pos_valida = false;
-
     while (!pos_valida) {
         pos_valida = true;
         dronex = (rand() % (118 - 8 + 1)) + 4;
         droney = (rand() % (54 - 8 + 1)) + 8;
-
         for (int i = 0; i < MAX_VITIMAS; i++) {
             int dx = abs(dronex - posx[i]);
             int dy = abs(droney - posy[i]);
@@ -232,36 +225,24 @@ void mover_drone() {
 
     adc_select_input(1);
     uint16_t val_x = adc_read();
-
     adc_select_input(0);
     uint16_t val_y = adc_read();
 
-    if (val_x < limiar_baixo && dronex > 4)
-        dronex -= passo;
-    else if (val_x > limiar_alto && dronex < 120)
-        dronex += passo;
-
-    if (val_y < limiar_baixo && droney < 56)
-        droney += passo;
-    else if (val_y > limiar_alto && droney > 8)
-        droney -= passo;
+    if (val_x < limiar_baixo && dronex > 4) dronex -= passo;
+    else if (val_x > limiar_alto && dronex < 120) dronex += passo;
+    if (val_y < limiar_baixo && droney < 56) droney += passo;
+    else if (val_y > limiar_alto && droney > 8) droney -= passo;
 }
 
 void verificar_resgate() {
     if(!botao_pressionado_flag) return;
-
-
     for (int i = 0; i < MAX_VITIMAS; i++) {
-        if (vitima_ativa[i] &&
-            abs(dronex - posx[i]) < DRONE_SIZE &&
-            abs(droney - posy[i]) < DRONE_SIZE) {
-            
+        if (vitima_ativa[i] && abs(dronex - posx[i]) < DRONE_SIZE && abs(droney - posy[i]) < DRONE_SIZE) {
             vitima_ativa[i] = false;
             total_resgatadas++;
             printf("[RESGATE] Vítima salva em %d, %d\n", posx[i], posy[i]);
         }
     }
-
     botao_pressionado_flag = false;
 }
 
@@ -270,43 +251,65 @@ bool checar_vitoria() {
 }
 
 void irq_buttons(uint gpio, uint32_t event){
-    if (gpio == BBUTTON){
-        absolute_time_t agr = get_absolute_time();
-
-        if (absolute_time_diff_us(ultimo_press, agr) > 250000){
-            botao_pressionado_flag = true;
-            ultimo_press = agr;
-        }
+    absolute_time_t agr = get_absolute_time();
+    if (gpio == BBUTTON && absolute_time_diff_us(ultimo_press, agr) > 250000){
+        botao_pressionado_flag = true;
+        ultimo_press = agr;
     }
-
-    if (gpio == ABUTTON) {
-        absolute_time_t agr = get_absolute_time();
-
-        if (absolute_time_diff_us(ultimo_press, agr) > 250000){
-            jogo_ativo = true;
-            ultimo_press = agr;
-
-            total_resgatadas = 0;
-            posicionar_vitimas();
-            posicionar_drone();
-            gpio_put(RED, false);
-            gpio_put(GREEN, false);
-            printf("[INICIO] Jogo iniciado.\n");
-        }
+    if (gpio == ABUTTON && absolute_time_diff_us(ultimo_press, agr) > 250000){
+        jogo_ativo = true;
+        ultimo_press = agr;
+        total_resgatadas = 0;
+        posicionar_vitimas();
+        posicionar_drone();
+        gpio_put(RED, false);
+        gpio_put(GREEN, false);
+        printf("[INICIO] Jogo iniciado.\n");
     }
 }
 
 void atualizar_led_azul() {
     bool sobre_vitima = false;
-
     for (int i = 0; i < MAX_VITIMAS; i++) {
-        if (vitima_ativa[i] &&
-            abs(dronex - posx[i]) < DRONE_SIZE &&
-            abs(droney - posy[i]) < DRONE_SIZE) {
+        if (vitima_ativa[i] && abs(dronex - posx[i]) < DRONE_SIZE && abs(droney - posy[i]) < DRONE_SIZE) {
             sobre_vitima = true;
             break;
         }
     }
-
     gpio_put(BLUE, sobre_vitima);
+}
+
+void atualizar_matriz_led() {
+    int vitimas_restantes = 0;
+    for (int i = 0; i < MAX_VITIMAS; i++)
+        if (vitima_ativa[i]) vitimas_restantes++;
+
+    show_numbers(vitimas_restantes);
+}
+
+void put_pixel(uint32_t pixel_grb) {
+    pio_sm_put_blocking(pio0, 0, pixel_grb << 8u);
+}
+
+uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint32_t)(g) << 16) | ((uint32_t)(r) << 8) | b;
+}
+
+void show_numbers(uint number) {
+    uint32_t numbers[6][25] = {
+        {0,0,0,0,0, 0,0,0,0,0, 0,1,1,1,0, 0,0,0,0,0, 0,0,0,0,0}, // - 
+        {0,1,1,1,0, 0,0,1,0,0, 0,0,1,0,0, 0,1,1,0,0, 0,0,1,0,0}, // 1
+        {0,1,1,1,0, 0,1,0,0,0, 0,1,1,0,0, 0,0,0,1,0, 0,1,1,1,0}, // 2
+        {0,1,1,1,0, 0,0,0,1,0, 0,1,1,1,0, 0,0,0,1,0, 0,1,1,1,0}, // 3
+        {0,1,0,0,0, 0,0,0,1,0, 0,1,1,1,0, 0,1,0,1,0, 0,1,0,1,0}, // 4
+        {0,1,1,1,0, 0,0,0,1,0, 0,0,1,1,0, 0,1,0,0,0, 0,1,1,1,0}  // 5
+    };
+
+    if (number > 5) number = 5;
+    for (uint i = 0; i < 25; i++) {
+        if (numbers[number][i])
+            put_pixel(color(2, 2, 2));  
+        else
+            put_pixel(0);                 
+    }
 }
